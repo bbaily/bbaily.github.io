@@ -104,6 +104,22 @@
       .tbItem .cnt { font-variant-numeric: tabular-nums; }
       .tbItem.neg { color: #b00020; border-color: #f2c0c6; background: #fff5f6; }
 
+      /* Solve panel */
+      #solvePanel { border: 1px solid #ddd; border-radius: 8px; padding: 10px 12px; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+      #solvePanel .label { font-size: 12px; color: #555; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .03em; }
+      #solveBtns { display: flex; gap: 6px; }
+      #solveBtns button { appearance: none; border: 1px solid #bbb; background: #fff; padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+      #solveBtns button:disabled { opacity: 0.5; cursor: not-allowed; }
+      #hintMsg { font-size: 13px; color: #333; min-height: 18px; margin-top: 8px; line-height: 1.4; white-space: pre-line; }
+      #hintMsg.success { color: #1a7f37; font-weight: 600; }
+      #hintMsg.beat { color: #8a4500; font-weight: 600; }
+      #hintMsg.wrong { color: #b00020; }
+
+      /* Hint highlights and tiles */
+      .square.row-hl, .square.col-hl { box-shadow: inset 0 0 0 2px #ff9500; }
+      .square.hint .cell { color: #b8860b; font-style: italic; background: #fff7e0; }
+      .square.hint.blank .cell { text-transform: lowercase; }
+
       
 
       @media (max-width: 700px) { :root { --cell: 34px; } }
@@ -157,6 +173,14 @@
             <button id="exportBtn" type="button">Export Puzzle</button>
           </div>
         </aside>
+        <aside id="solvePanel" style="display:none;">
+          <div class="label">Solve</div>
+          <div id="solveBtns">
+            <button id="submitBtn" type="button">Submit</button>
+            <button id="skipBtn" type="button">Skip (Hint)</button>
+          </div>
+          <div id="hintMsg"></div>
+        </aside>
         <aside id="bagPanel">
           <div class="label">Tile Bag</div>
           <div id="tileBag"></div>
@@ -186,6 +210,13 @@
         const fenBox = document.getElementById('fenBox');
         const importBtn = document.getElementById('importBtn');
         const exportBtn = document.getElementById('exportBtn');
+        const solvePanel = document.getElementById('solvePanel');
+        const submitBtn = document.getElementById('submitBtn');
+        const skipBtn = document.getElementById('skipBtn');
+        const hintMsgEl = document.getElementById('hintMsg');
+        let puzzleSolution = null;
+        let hintStage = 0;
+        let puzzleSolved = false;
         
 
         const TW = new Set(['0,0','0,7','0,14','7,0','7,14','14,0','14,7','14,14']);
@@ -351,20 +382,111 @@
           puzzleMode = false;
         }
 
+        function encodeSolutionData(obj) {
+          const s = JSON.stringify(obj);
+          const b64 = btoa(unescape(encodeURIComponent(s)));
+          return b64.split('').reverse().join('');
+        }
+        function decodeSolutionData(enc) {
+          const b64 = enc.split('').reverse().join('');
+          return JSON.parse(decodeURIComponent(escape(atob(b64))));
+        }
+
+        function analyzeMove() {
+          const newCells = [], lockedCells = [];
+          for (let i = 0; i < board.children.length; i++) {
+            const sq = board.children[i];
+            const inp = getInput(sq);
+            const val = (inp && inp.value || '').trim();
+            if (!val) continue;
+            const { r, c } = rc(i);
+            if (sq.classList.contains('locked')) lockedCells.push({ r, c });
+            else newCells.push({ r, c });
+          }
+          if (newCells.length === 0) return { valid: false, reason: 'No new tiles placed' };
+          const rows = new Set(newCells.map(p => p.r));
+          const cols = new Set(newCells.map(p => p.c));
+          let mode, line;
+          if (rows.size === 1) { mode = 'row'; line = newCells[0].r; }
+          else if (cols.size === 1) { mode = 'col'; line = newCells[0].c; }
+          else return { valid: false, reason: 'Tiles must be in a single row or column' };
+
+          const lineHasLetter = new Array(size).fill(false);
+          for (let i = 0; i < size; i++) {
+            const r = mode === 'row' ? line : i;
+            const c = mode === 'row' ? i : line;
+            lineHasLetter[i] = hasLetter(board.children[idx(r, c)]);
+          }
+          const newIdxs = newCells.map(p => mode === 'row' ? p.c : p.r);
+          let minPos = Math.min(...newIdxs);
+          let maxPos = Math.max(...newIdxs);
+          while (minPos > 0 && lineHasLetter[minPos - 1]) minPos--;
+          while (maxPos < size - 1 && lineHasLetter[maxPos + 1]) maxPos++;
+          for (let i = minPos; i <= maxPos; i++) {
+            if (!lineHasLetter[i]) return { valid: false, reason: 'Gap in word' };
+          }
+          if (lockedCells.length === 0) {
+            if (!(line === 7 && minPos <= 7 && maxPos >= 7)) return { valid: false, reason: 'First move must cover center' };
+          } else {
+            let touches = false;
+            for (let i = minPos; i <= maxPos && !touches; i++) {
+              const r = mode === 'row' ? line : i; const c = mode === 'row' ? i : line;
+              for (const [dr, dc] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+                const nr = r+dr, nc = c+dc;
+                if (inBounds(nr, nc) && isLockedCell(nr, nc)) { touches = true; break; }
+              }
+            }
+            if (!touches) return { valid: false, reason: 'Move does not connect to existing tiles' };
+          }
+          let word = '';
+          const tiles = [];
+          for (let i = minPos; i <= maxPos; i++) {
+            const r = mode === 'row' ? line : i; const c = mode === 'row' ? i : line;
+            word += getChar(r, c);
+            const sq = board.children[idx(r, c)];
+            if (!sq.classList.contains('locked')) {
+              tiles.push({ r, c, l: getChar(r, c), b: sq.classList.contains('blank') ? 1 : 0 });
+            }
+          }
+          const score = computeTotalScore(mode, line, minPos, maxPos);
+          return {
+            valid: true,
+            mode, line, minPos, maxPos,
+            word, tiles, score,
+            wordR: mode === 'row' ? line : minPos,
+            wordC: mode === 'row' ? minPos : line,
+          };
+        }
+
         function exportPuzzle() {
           if (!puzzleMode || !rackLocked) { alert('Please lock board and rack before exporting.'); return; }
+          const move = analyzeMove();
+          if (!move.valid) { alert('To export, place a valid solution using rack tiles.\n' + (move.reason || '')); return; }
+          const dict = window.SCRABBLE_DICT || {};
+          if (!dict[move.word]) { alert('The solution word "' + move.word + '" is not in the dictionary.'); return; }
+          if (!validateBoardWords()) { alert('All words formed must be valid.'); return; }
+
           let lines = [];
-          for (let r=0;r<size;r++){
-            let row='';
-            for (let c=0;c<size;c++){
-              const ch = getChar(r,c);
-              if (!ch) { row+='.'; continue; }
-              row += isBlank(r,c) ? ch.toLowerCase() : ch.toUpperCase();
+          for (let r = 0; r < size; r++) {
+            let row = '';
+            for (let c = 0; c < size; c++) {
+              const sq = board.children[idx(r, c)];
+              if (!sq.classList.contains('locked')) { row += '.'; continue; }
+              const ch = getChar(r, c);
+              if (!ch) { row += '.'; continue; }
+              row += isBlank(r, c) ? ch.toLowerCase() : ch.toUpperCase();
             }
             lines.push(row);
           }
           lines.push('');
           lines.push(sanitizeRack(rackInput.value));
+          lines.push('');
+          const payload = {
+            d: move.mode === 'row' ? 'H' : 'V',
+            r: move.wordR, c: move.wordC,
+            w: move.word, t: move.tiles, s: move.score,
+          };
+          lines.push(encodeSolutionData(payload));
           fenBox.value = lines.join('\n');
         }
 
@@ -375,7 +497,15 @@
           const grid = lines.slice(0,15);
           const rackLine = lines[16] || '';
           if (grid.some(l => l.length !== 15)) { alert('Each of the first 15 lines must have exactly 15 characters.'); return; }
+
+          let solutionData = null;
+          if (lines.length >= 19 && lines[18] && lines[18].trim()) {
+            try { solutionData = decodeSolutionData(lines[18].trim()); }
+            catch (e) { console.warn('Could not decode solution', e); }
+          }
+
           clearBoardUnlocked();
+          clearHintState();
           for (let r=0;r<15;r++){
             for (let c=0;c<15;c++){
               const ch = grid[r][c];
@@ -395,11 +525,174 @@
           puzzleMode = true;
           rackInput.value = sanitizeRack(rackLine);
           lockRack();
+
+          puzzleSolution = solutionData;
+          hintStage = 0;
+          puzzleSolved = false;
+          updateSolvePanel();
+
           updateRackTiles();
           updateTileBag();
           validateSolution();
           validateBoardWords();
           updateToggleLabels();
+        }
+
+        function clearHintState() {
+          for (const sq of board.children) {
+            sq.classList.remove('row-hl', 'col-hl');
+            if (sq.classList.contains('hint')) {
+              sq.classList.remove('hint');
+              const inp = getInput(sq);
+              if (inp) {
+                inp.value = '';
+                inp.dataset.prev = '';
+                inp.readOnly = false;
+                inp.removeAttribute('aria-readonly');
+              }
+              sq.classList.remove('blank');
+              delete sq.dataset.blank;
+              delete sq.dataset.forceBlank;
+            }
+          }
+          hintStage = 0;
+          puzzleSolved = false;
+          if (hintMsgEl) { hintMsgEl.textContent = ''; hintMsgEl.className = ''; }
+        }
+
+        function updateSolvePanel() {
+          if (!solvePanel) return;
+          solvePanel.style.display = puzzleSolution ? 'block' : 'none';
+          if (submitBtn) submitBtn.disabled = !puzzleSolution || puzzleSolved;
+          if (skipBtn) skipBtn.disabled = !puzzleSolution || puzzleSolved;
+        }
+
+        function escapeHtml(s) {
+          return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        }
+
+        function showHintMsg(msg, kind) {
+          if (!hintMsgEl) return;
+          hintMsgEl.textContent = msg;
+          hintMsgEl.className = kind || '';
+        }
+
+        function renderHintList(headerMsg, kind) {
+          if (!hintMsgEl) return;
+          const sol = puzzleSolution;
+          const tiles = (sol && sol.t) || [];
+          const parts = [];
+          if (hintStage >= 1) parts.push(`Intended score: ${sol.s}`);
+          if (hintStage >= 2) parts.push(`Tiles played: ${(sol.t || []).length}`);
+          if (hintStage >= 3) parts.push(sol.d === 'H' ? `Played on row ${sol.r + 1}` : `Played on column ${sol.c + 1}`);
+          if (hintStage >= 4) {
+            const placed = Math.min(hintStage - 3, tiles.length);
+            parts.push(`Revealed ${placed} of ${tiles.length} tile${tiles.length === 1 ? '' : 's'}`);
+          }
+          let html = '';
+          if (headerMsg) html += `<div style="margin-bottom:6px;">${escapeHtml(headerMsg)}</div>`;
+          if (parts.length > 0) {
+            html += `<div style="font-weight:600; margin-bottom:2px;">Hints:</div>`;
+            html += `<ul style="margin:0; padding-left:18px;">${parts.map(p => `<li>${escapeHtml(p)}</li>`).join('')}</ul>`;
+          }
+          hintMsgEl.innerHTML = html;
+          hintMsgEl.className = kind || '';
+        }
+
+        function tilesMatchSolution(userTiles) {
+          const solTiles = (puzzleSolution && puzzleSolution.t) || [];
+          if (userTiles.length !== solTiles.length) return false;
+          const key = t => `${t.r},${t.c},${t.l},${t.b ? 1 : 0}`;
+          const userSet = new Set(userTiles.map(key));
+          for (const t of solTiles) if (!userSet.has(key(t))) return false;
+          return true;
+        }
+
+        function submitSolution() {
+          if (!puzzleSolution || puzzleSolved) return;
+          const move = analyzeMove();
+          const dict = window.SCRABBLE_DICT || {};
+          let validMove = move.valid;
+          if (validMove) validMove = !!dict[move.word] && validateBoardWords();
+
+          if (!validMove) {
+            const msg = 'Not a valid play. ' + (move.reason || 'Word not in dictionary or invalid cross-words.') + ' Revealing a hint.';
+            hintStage++;
+            applyHint(msg);
+            return;
+          }
+
+          if (tilesMatchSolution(move.tiles)) {
+            const n = hintStage;
+            const hintStr = n === 0 ? 'no hints' : `${n} hint${n === 1 ? '' : 's'}`;
+            showHintMsg(`Correct! Solved with ${hintStr}.`, 'success');
+            puzzleSolved = true;
+            updateSolvePanel();
+            return;
+          }
+
+          const intended = puzzleSolution.s;
+          const score = move.score;
+
+          if (score > intended) {
+            showHintMsg(`You beat the intended solution! The puzzle designer missed this. (You: ${score}, Intended: ${intended})`, 'beat');
+            puzzleSolved = true;
+            updateSolvePanel();
+            return;
+          }
+          if (score >= intended - 5) {
+            showHintMsg(`Alternate solution! (You: ${score}, Intended: ${intended})`, 'success');
+            puzzleSolved = true;
+            updateSolvePanel();
+            return;
+          }
+          const rejectMsg = `Not quite — your play scored ${score}, but the intended solution scores higher. Revealing a hint.`;
+          hintStage++;
+          applyHint(rejectMsg);
+        }
+
+        function advanceHint() {
+          if (!puzzleSolution || puzzleSolved) return;
+          hintStage++;
+          applyHint();
+        }
+
+        function applyHint(headerMsg) {
+          if (!puzzleSolution) return;
+          const sol = puzzleSolution;
+          const tiles = sol.t || [];
+
+          renderHintList(headerMsg || '', 'wrong');
+
+          for (const sq of board.children) sq.classList.remove('row-hl', 'col-hl');
+          if (hintStage >= 3) {
+            for (let i = 0; i < size; i++) {
+              const r = sol.d === 'H' ? sol.r : i;
+              const c = sol.d === 'H' ? i : sol.c;
+              board.children[idx(r, c)].classList.add(sol.d === 'H' ? 'row-hl' : 'col-hl');
+            }
+          }
+
+          if (hintStage >= 4) {
+            const numToReveal = Math.min(hintStage - 3, tiles.length);
+            for (let i = 0; i < numToReveal; i++) {
+              const t = tiles[i];
+              const sq = board.children[idx(t.r, t.c)];
+              const inp = getInput(sq);
+              if (sq.classList.contains('locked')) continue;
+              inp.value = t.l;
+              inp.dataset.prev = t.l;
+              if (t.b) { sq.classList.add('blank'); sq.dataset.blank = '1'; sq.dataset.forceBlank = '1'; }
+              else { sq.classList.remove('blank'); delete sq.dataset.blank; delete sq.dataset.forceBlank; }
+              sq.classList.add('hint');
+              inp.readOnly = true;
+              inp.setAttribute('aria-readonly', 'true');
+            }
+            updateRackTiles();
+            updateTileBag();
+            validateSolution();
+            validateBoardWords();
+          }
         }
 
         rackInput.addEventListener('input', () => {
@@ -510,11 +803,17 @@
             input.readOnly = false;
             input.removeAttribute('aria-readonly');
             square.classList.remove('locked');
+            square.classList.remove('row-hl', 'col-hl', 'hint');
           }
           puzzleMode = false;
           setValidity(true);
           filterMoveWords = false;
           wordsListEl.textContent = 'Lock the board to validate words.';
+          puzzleSolution = null;
+          hintStage = 0;
+          puzzleSolved = false;
+          if (hintMsgEl) { hintMsgEl.textContent = ''; hintMsgEl.className = ''; }
+          updateSolvePanel();
           updateRackTiles();
           updateTileBag();
         }
@@ -573,8 +872,11 @@
         rackToggleBtn.addEventListener('click', toggleRack);
         document.getElementById('exportBtn').addEventListener('click', exportPuzzle);
         document.getElementById('importBtn').addEventListener('click', importPuzzle);
+        submitBtn.addEventListener('click', submitSolution);
+        skipBtn.addEventListener('click', advanceHint);
         updateToggleLabels();
         updateTileBag();
+        updateSolvePanel();
 
         function updateToggleLabels(){
           boardToggleBtn.textContent = puzzleMode ? 'Unlock Board' : 'Lock Board';
