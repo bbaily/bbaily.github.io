@@ -582,7 +582,10 @@
           const sol = puzzleSolution;
           const tiles = (sol && sol.t) || [];
           const parts = [];
-          if (hintStage >= 1) parts.push(`Intended score: ${sol.s}`);
+          if (hintStage >= 1) {
+            const intendedTotal = sol.s + (((sol.t || []).length === 7) ? 50 : 0);
+            parts.push(`Intended score: ${intendedTotal}`);
+          }
           if (hintStage >= 2) parts.push(`Tiles played: ${(sol.t || []).length}`);
           if (hintStage >= 3) parts.push(sol.d === 'H' ? `Played on row ${sol.r + 1}` : `Played on column ${sol.c + 1}`);
           if (hintStage >= 4) {
@@ -631,8 +634,9 @@
             return;
           }
 
-          const intended = puzzleSolution.s;
-          const score = move.score;
+          const intendedTiles = (puzzleSolution.t || []).length;
+          const intended = puzzleSolution.s + (intendedTiles === 7 ? 50 : 0);
+          const score = move.score + (move.tiles.length === 7 ? 50 : 0);
 
           if (score > intended) {
             showHintMsg(`You beat the intended solution! The puzzle designer missed this. (You: ${score}, Intended: ${intended})`, 'beat');
